@@ -1,7 +1,7 @@
 import { signal } from '@preact/signals';
 import { io, Socket } from 'socket.io-client';
 
-export type Phase = 'setup' | 'playing' | 'scoring' | 'over';
+export type Phase = 'setup' | 'placement' | 'playing' | 'scoring' | 'over';
 export type Color = 1 | 2;
 
 export interface ChatMsg {
@@ -42,6 +42,8 @@ export interface GameState {
   aiThinking: boolean;
   heatmap: number[] | null;
   hintMoves: string[];
+  /** 摆子阶段剩余让子手数 */
+  handicapRemaining: number;
   winrate: number | null;
   scoreLead: number | null;
   consecutivePasses: number;
@@ -67,6 +69,7 @@ export const state = signal<GameState>({
   aiThinking: false,
   heatmap: null,
   hintMoves: [],
+  handicapRemaining: 0,
   winrate: null,
   scoreLead: null,
   consecutivePasses: 0,
@@ -135,6 +138,15 @@ export const actions = {
   },
   finishScoring(): void {
     socket?.emit('game:finishScoring');
+  },
+  reopenBoard(): void {
+    // 带超时 ack：服务端未更新/未响应时给出明确提示，而不是静默失败
+    socket?.timeout(3000).emit('game:reopen', (err: unknown) => {
+      if (err) {
+        lastError.value = '服务端未响应「回到棋盘」，请重启服务端（关掉重跑 start.cmd / dev.cmd）';
+        setTimeout(() => (lastError.value = ''), 5000);
+      }
+    });
   },
   toggleTerritory(): void {
     territoryView.value = !territoryView.value;

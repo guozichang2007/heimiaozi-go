@@ -13,15 +13,17 @@ function StatusBar() {
   const s = state.value;
   const cfg = serverConfig.value;
   const turn =
-    s.phase === 'playing'
-      ? s.currentPlayer === s.settings?.humanColor
-        ? '你的回合'
-        : '黑喵子思考中…'
-      : s.phase === 'scoring'
-        ? '数子阶段：点选死子，然后「完成数子」'
-        : s.phase === 'over'
-          ? '对局结束'
-          : '等待开局';
+    s.phase === 'placement'
+      ? `摆让子：还剩 ${s.handicapRemaining ?? 0} 手，自由摆放`
+      : s.phase === 'playing'
+        ? s.currentPlayer === s.settings?.humanColor
+          ? '你的回合'
+          : '黑喵子思考中…'
+        : s.phase === 'scoring'
+          ? '数子阶段：点选死子，然后「完成数子」'
+          : s.phase === 'over'
+            ? '对局结束'
+            : '等待开局';
   return (
     <div className="statusbar">
       <span className={`dot ${connected.value ? 'ok' : ''}`} /> {connected.value ? '已连接' : '未连接'}
@@ -41,10 +43,10 @@ function StatusBar() {
 export function App() {
   const [settingsOpen, setSettingsOpen] = useState(state.value.phase === 'setup');
 
-  // 对局开始后自动收起设置面板
+  // 对局开始后自动收起设置面板（含让子摆子阶段）
   useEffect(() => {
     const p = state.value.phase;
-    if (p === 'playing' || p === 'scoring') {
+    if (p === 'playing' || p === 'scoring' || p === 'placement') {
       setSettingsOpen(false);
     }
   }, [state.value.phase, state.value.moveCount, state.value.settings]);

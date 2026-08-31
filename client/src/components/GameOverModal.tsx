@@ -29,6 +29,9 @@ export function GameOverModal({ onNewGame }: { onNewGame: () => void }) {
           含贴目：黑 {r.blackScore.toFixed(1)} · 白 {r.whiteScore.toFixed(1)} · 领先 {r.margin.toFixed(1)}
         </div>
         <div className="gameover-actions">
+          <button className="ghost-btn" onClick={() => actions.reopenBoard()}>
+            ⏪ 回到棋盘
+          </button>
           <button className="start-btn" onClick={onNewGame}>
             再来一局
           </button>

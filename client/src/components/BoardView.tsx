@@ -83,7 +83,11 @@ export function BoardView() {
   const heat = territoryView.value && s.heatmap ? toHeatMap(s.heatmap, size) : null;
   const markerMap = toMarkerMap(s);
 
-  const humanTurn = s.phase === 'playing' && s.settings && s.currentPlayer === s.settings.humanColor && !s.aiThinking;
+  const humanTurn =
+    (s.phase === 'playing' || s.phase === 'placement') &&
+    s.settings &&
+    s.currentPlayer === s.settings.humanColor &&
+    !s.aiThinking;
   const dimmed = s.phase === 'scoring' ? s.deadStones.map((idx) => [idx % size, Math.floor(idx / size)] as [number, number]) : [];
 
   const onVertex = (_evt: MouseEvent, [x, y]: [number, number]) => {

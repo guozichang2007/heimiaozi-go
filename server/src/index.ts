@@ -31,8 +31,9 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 function normalizeSettings(raw: any): GameSettings {
   const boardSize = [9, 13, 19].includes(Number(raw.boardSize)) ? Number(raw.boardSize) : 19;
-  const komi = Math.max(-20, Math.min(20, Number(raw.komi) || 7.5));
-  const handicap = Math.max(0, Math.min(9, Number(raw.handicap) || 0));
+  const handicap = Math.max(0, Math.min(40, Number(raw.handicap) || 0));
+  let komi = Math.max(-20, Math.min(20, Number(raw.komi) || 7.5));
+  if (handicap > 0) komi = 0; // 让子局白不贴目
   const difficulty: Difficulty = DIFFICULTY_KEYS.includes(raw.difficulty) ? raw.difficulty : 'hard';
   let humanColor: Color = raw.humanColor === 'W' ? WHITE : BLACK;
   if (handicap > 0) humanColor = BLACK; // 让子棋用户执黑
@@ -65,6 +66,8 @@ async function main() {
   const manager = new GameManager(gtp, analysis, {
     onState: (s) => io.emit('state', s),
     onAiMoved: (evt) => {
+      // 仅在本喵方胜率较上一手 AI 变化 ≥15% 时才发言
+      if (!agent.shouldSpeakOnAiMove(evt)) return;
       const msgId = randomUUID();
       io.emit('chat:start', { id: msgId, role: 'miaomiao' });
       agent.generateAiMoveLine(
@@ -138,6 +141,7 @@ async function main() {
         return;
       }
       try {
+        agent.resetAiMoveWinrate(); // 新对局重置落子发言基准
         await manager.startGame(normalizeSettings(settings));
       } catch (e) {
         socket.emit('error', `开局失败: ${(e as Error).message}`);
@@ -161,6 +165,10 @@ async function main() {
     });
     socket.on('game:finishScoring', async () => {
       await manager.finishScoring();
+    });
+    socket.on('game:reopen', async (ack) => {
+      const ok = await manager.reopenBoard();
+      if (typeof ack === 'function') ack(ok);
     });
     socket.on('game:territory', async (on: boolean) => {
       if (on) await manager.requestTerritory();

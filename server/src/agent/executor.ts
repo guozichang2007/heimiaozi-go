@@ -1,6 +1,5 @@
 import { GameManager } from '../game/gameManager';
 import { BLACK, WHITE } from '../game/goban';
-import { DIFFICULTIES } from '../katago/difficulty';
 
 /** 把 GTP 坐标（如 Q16）转成中文方位描述（如 右上角），适配 9/13/19 路 */
 function describePosition(vertex: string, size: number): string {
@@ -33,22 +32,23 @@ export class Executor {
     const s = this.game.getState();
     const st = s.settings;
     if (!st || s.phase === 'setup') return '对局尚未开始，还在准备中喵。';
-    const side = s.currentPlayer === BLACK ? '黑棋' : '白棋';
-    const who = s.currentPlayer === st.humanColor ? '你' : '黑喵子';
-    const win = s.winrate != null ? `${(s.winrate * 100).toFixed(0)}%` : '未知';
-    const lead = s.scoreLead != null ? `${s.scoreLead >= 0 ? '+' : ''}${s.scoreLead.toFixed(1)}目` : '未知';
-    const diff = DIFFICULTIES[st.difficulty].label;
-    // 盘面子数：帮黑喵子感知当前棋盘
-    const blackCount = s.grid.filter((v) => v === 1).length;
-    const whiteCount = s.grid.filter((v) => v === 2).length;
+    const who = s.currentPlayer === st.humanColor ? '用户' : '本喵';
+    const colorName = s.currentPlayer === BLACK ? '黑子' : '白子';
+    // 胜率/目差换算为黑喵子（本喵）方视角（分析引擎报告的是「轮到方」视角）
+    const aiColor = st.aiColor;
+    const aiSide = s.currentPlayer === aiColor;
+    const win = s.winrate != null ? `${((aiSide ? s.winrate : 1 - s.winrate) * 100).toFixed(0)}%` : '未知';
+    let aiLead: number | null = null;
+    if (s.scoreLead != null) aiLead = aiSide ? s.scoreLead : -s.scoreLead;
+    const lead = aiLead != null ? `${aiLead >= 0 ? '+' : ''}${aiLead.toFixed(1)}目` : '未知';
     // 最近几手归属：帮黑喵子分清谁下的棋
     const recent = this.game
       .getMoves()
       .slice(-6)
-      .map((m) => `${m.color === BLACK ? '黑' : '白'} ${m.pass ? '停一手' : m.vertex ?? ''}`)
+      .map((m) => `${m.color === BLACK ? '黑' : '白'} ${m.pass ? '停一手' : (m.vertex ?? '').toUpperCase()}`)
       .join(' → ');
     const recentText = recent ? `。最近几手：${recent}` : '';
-    return `${s.boardSize}路棋盘，第${s.moveCount}手，轮到${side}（${who}），难度：${diff}，贴目 ${st.komi}，盘面黑${blackCount}子/白${whiteCount}子。最近分析：轮到方胜率约${win}，目差约${lead}${recentText}。`;
+    return `${s.boardSize}路棋盘，第${s.moveCount}手，轮到${who}（执${colorName}）。最近分析：本喵方胜率约${win}，目差约${lead}${recentText}。`;
   }
 
   /** 为当前轮到的一方（通常是你）求最佳点，返回格式化分析结果 */

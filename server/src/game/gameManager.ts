@@ -1,10 +1,10 @@
 import { Goban, Color, BLACK, WHITE, otherColor } from './goban';
-import { GtpEngine, vertexToGtp, gtpToXY, handicapStones } from '../katago/gtpEngine';
+import { GtpEngine, vertexToGtp, gtpToXY } from '../katago/gtpEngine';
 import { AnalysisEngine, AnalysisResponse } from '../katago/analysisEngine';
 import { Difficulty } from '../katago/difficulty';
 import { computeScoreWithKomi, ScoreResult } from './scoring';
 
-export type Phase = 'setup' | 'playing' | 'scoring' | 'over';
+export type Phase = 'setup' | 'placement' | 'playing' | 'scoring' | 'over';
 
 export interface GameSettings {
   boardSize: number;
@@ -52,6 +52,8 @@ export interface PublicState {
   heatmap: number[] | null;
   /** 提示的最佳选点（GTP 坐标） */
   hintMoves: string[];
+  /** 摆子阶段剩余让子手数 */
+  handicapRemaining: number;
   /** 最近一次分析：轮到的一方（side to move）胜率 0~1 */
   winrate: number | null;
   /** 最近一次分析：轮到的一方目差（正=领先） */
@@ -93,6 +95,7 @@ export class GameManager {
     aiThinking: false,
     heatmap: null,
     hintMoves: [],
+    handicapRemaining: 0,
     winrate: null,
     scoreLead: null,
     consecutivePasses: 0,
@@ -153,13 +156,14 @@ export class GameManager {
   private async startGameImpl(settings: GameSettings): Promise<void> {
     this.moves = [];
     this.goban = new Goban(settings.boardSize);
+    const isHandicap = settings.handicap > 0;
     this.state = {
-      phase: 'playing',
+      phase: isHandicap ? 'placement' : 'playing',
       boardSize: settings.boardSize,
       grid: this.goban.toArray(),
       captures: { [BLACK]: 0, [WHITE]: 0 },
       lastMove: null,
-      currentPlayer: settings.handicap > 0 ? WHITE : BLACK,
+      currentPlayer: isHandicap ? settings.humanColor : BLACK,
       moveCount: 0,
       settings,
       deadStones: [],
@@ -170,24 +174,14 @@ export class GameManager {
       winrate: null,
       scoreLead: null,
       consecutivePasses: 0,
+      handicapRemaining: isHandicap ? settings.handicap : 0,
     };
     await this.gtp.clearBoard(settings.boardSize, settings.komi);
     await this.gtp.applyDifficulty(settings.difficulty);
-
-    if (settings.handicap > 0) {
-      const stones = handicapStones(settings.handicap, settings.boardSize);
-      await this.gtp.setHandicap(stones);
-      for (const s of stones) {
-        const [x, y] = gtpToXY(s, settings.boardSize);
-        this.goban.place(BLACK, x, y); // 让子视为黑棋落子
-        this.pushMove(BLACK, x, y, false, 0, s);
-      }
-      this.state.currentPlayer = WHITE;
-    }
+    // 让子棋：进入摆子阶段，由玩家自由摆放 N 颗黑子
     this.emit();
-
-    // 若轮到 AI 先手
-    if (this.state.phase === 'playing' && this.state.currentPlayer === settings.aiColor) {
+    // 无让子且 AI 先手（用户执白）时 AI 先落子
+    if (!isHandicap && this.state.currentPlayer === settings.aiColor) {
       await this.aiMove();
     }
   }
@@ -216,11 +210,40 @@ export class GameManager {
 
   private async humanPlayImpl(x: number, y: number): Promise<boolean> {
     const s = this.state;
-    if (s.phase !== 'playing' || !s.settings) return false;
-    if (s.currentPlayer !== s.settings.humanColor) return false;
+    if (!s.settings) return false;
     if (s.aiThinking) return false;
+    if (s.currentPlayer !== s.settings.humanColor) return false;
     const vertex = vertexToGtp(x, y, s.boardSize);
-    // 先让引擎落子（引擎为规则权威）；成功后再更新本地棋盘，避免残留幽灵子
+
+    // 摆子阶段：玩家自由摆放让子
+    if (s.phase === 'placement') {
+      try {
+        await this.gtp.play(s.settings.humanColor, vertex);
+      } catch (e) {
+        return false;
+      }
+      try {
+        const res = this.goban.place(s.settings.humanColor, x, y);
+        this.pushMove(s.settings.humanColor, x, y, false, res.captured.length);
+      } catch (e) {
+        await this.syncFromHistory();
+        return false;
+      }
+      s.handicapRemaining = Math.max(0, s.handicapRemaining - 1);
+      this.state.winrate = null;
+      if (s.handicapRemaining <= 0) {
+        s.phase = 'playing';
+        s.currentPlayer = otherColor(s.settings.humanColor);
+        this.emit();
+        await this.aiMove(); // 摆完让子，AI 先手
+      } else {
+        this.emit();
+      }
+      return true;
+    }
+
+    // 正常对弈：先让引擎落子（引擎为规则权威）；成功后再更新本地棋盘
+    if (s.phase !== 'playing') return false;
     try {
       await this.gtp.play(s.settings.humanColor, vertex);
     } catch (e) {
@@ -341,8 +364,19 @@ export class GameManager {
 
   private async undoImpl(): Promise<boolean> {
     const s = this.state;
-    if (s.phase !== 'playing' || !s.settings || s.aiThinking) return false;
+    if ((s.phase !== 'playing' && s.phase !== 'placement') || !s.settings || s.aiThinking) return false;
     if (this.moves.length === 0) return false;
+
+    // 摆子阶段：撤掉最后一颗让子
+    if (s.phase === 'placement') {
+      this.moves = this.moves.slice(0, this.moves.length - 1);
+      s.handicapRemaining = Math.min(s.settings.handicap, s.handicapRemaining + 1);
+      await this.syncFromHistory();
+      this.state.winrate = null;
+      this.state.hintMoves = [];
+      this.emit();
+      return true;
+    }
 
     const human = s.settings.humanColor;
     const ai = s.settings.aiColor;
@@ -412,6 +446,30 @@ export class GameManager {
     return this.state.result;
   }
 
+  /** 数子结算后回到棋盘：恢复为可交互对弈状态（悔棋/看地盘/存SGF等正常可用） */
+  async reopenBoard(): Promise<boolean> {
+    return this.enqueue(() => this.reopenBoardImpl());
+  }
+
+  private async reopenBoardImpl(): Promise<boolean> {
+    const s = this.state;
+    if (s.phase !== 'over' || !s.settings) return false;
+    s.phase = 'playing';
+    s.result = null;
+    s.consecutivePasses = 0;
+    s.deadStones = [];
+    s.winrate = null;
+    s.scoreLead = null;
+    s.heatmap = null;
+    s.hintMoves = [];
+    this.emit();
+    // 若轮到 AI 先手则继续走子，避免停在"AI 回合但不动"的死状态
+    if (s.currentPlayer === s.settings.aiColor) {
+      await this.aiMove();
+    }
+    return true;
+  }
+
   private endGame(partial: Partial<GameResult>): void {
     const s = this.state;
     const winner = partial.winner!;
@@ -439,7 +497,6 @@ export class GameManager {
     this.goban = new Goban(s.settings.boardSize);
     await this.gtp.clearBoard(s.settings.boardSize, s.settings.komi);
     await this.gtp.applyDifficulty(s.settings.difficulty);
-    let cur: Color = s.settings.handicap > 0 ? WHITE : BLACK;
     for (const mv of this.moves) {
       if (!mv.pass) {
         try {
@@ -451,9 +508,15 @@ export class GameManager {
       } else {
         await this.gtp.play(mv.color, null);
       }
-      cur = otherColor(cur);
     }
-    s.currentPlayer = cur;
+    // 计算当前轮到谁：摆子阶段始终玩家；否则按最后一手交替
+    if (s.phase === 'placement') {
+      s.currentPlayer = s.settings.humanColor;
+    } else if (this.moves.length === 0) {
+      s.currentPlayer = s.settings.handicap > 0 ? WHITE : BLACK;
+    } else {
+      s.currentPlayer = otherColor(this.moves[this.moves.length - 1].color);
+    }
     s.captures = { ...this.goban.captures };
     s.lastMove = this.goban.lastMove;
     s.moveCount = this.moves.length;

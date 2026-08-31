@@ -12,12 +12,20 @@ const DIFFICULTY_OPTIONS = [
 export function SettingsPanel() {
   const [boardSize, setBoardSize] = useState(19);
   const [difficulty, setDifficulty] = useState('hard');
-  const [handicap, setHandicap] = useState(0);
+  const [handicapEnabled, setHandicapEnabled] = useState(false);
+  const [handicap, setHandicap] = useState(4);
   const [humanColor, setHumanColor] = useState<'B' | 'W'>('B');
   const komi = boardSize === 9 ? 5.5 : boardSize === 13 ? 6.5 : 7.5;
 
   const start = () => {
-    actions.startGame({ boardSize, difficulty, handicap, humanColor, komi });
+    // 让子局固定执黑、白不贴目（服务端同样强制）
+    actions.startGame({
+      boardSize,
+      difficulty,
+      handicap: handicapEnabled ? handicap : 0,
+      humanColor: handicapEnabled ? 'B' : humanColor,
+      komi,
+    });
   };
 
   return (
@@ -49,15 +57,33 @@ export function SettingsPanel() {
         </div>
 
         <div className="field">
-          <label>让子（黑喵子让给你）</label>
-          <div className="seg">
-            {[0, 2, 3, 4, 5, 6, 7, 9].map((n) => (
-              <button key={n} className={handicap === n ? 'on' : ''} onClick={() => setHandicap(n)}>
-                {n === 0 ? '不让' : `${n}子`}
-              </button>
-            ))}
+          <label className="handicap-chk">
+            <input
+              type="checkbox"
+              checked={handicapEnabled}
+              onChange={(e) => setHandicapEnabled((e.target as HTMLInputElement).checked)}
+            />
+            让子（黑喵子让给你）
+          </label>
+          <div className="handicap-row">
+            <input
+              type="number"
+              min={1}
+              max={40}
+              value={handicap}
+              disabled={!handicapEnabled}
+              onInput={(e) => {
+                const v = Number((e.target as HTMLInputElement).value);
+                setHandicap(Number.isFinite(v) ? Math.max(1, Math.min(40, Math.round(v))) : 1);
+              }}
+            />
+            <span>子</span>
           </div>
-          <div className="hint">让子 ≥ 1 时你将执黑先落子</div>
+          <div className="hint">
+            {handicapEnabled
+              ? `开启后你执黑，先在空棋盘上自由摆放 ${handicap} 颗黑子，摆完黑喵子才落子`
+              : '让子 1~40 手：开局由你自由选择落点连续摆子'}
+          </div>
         </div>
 
         <div className="field">
@@ -72,7 +98,9 @@ export function SettingsPanel() {
           </div>
         </div>
 
-        <div className="field-info">贴目 {komi} · 中国规则数子法 · 黑喵子会边下边聊天</div>
+        <div className="field-info">
+          {handicapEnabled ? '贴目 0 · 让子局白不贴目' : `贴目 ${komi}`} · 中国规则数子法 · 黑喵子会边下边聊天
+        </div>
 
         <button className="start-btn" onClick={start}>
           开始对弈

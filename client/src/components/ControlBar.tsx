@@ -3,13 +3,14 @@ import { state, actions, territoryView, hintLoading } from '../state/store';
 export function ControlBar({ onNewGame }: { onNewGame: () => void }) {
   const s = state.value;
   const playing = s.phase === 'playing';
+  const placement = s.phase === 'placement';
   const scoring = s.phase === 'scoring';
   const over = s.phase === 'over';
   const humanTurn = playing && !s.aiThinking && !!s.settings && s.currentPlayer === s.settings.humanColor;
 
   return (
     <div className="controls">
-      <button disabled={!playing || s.aiThinking} onClick={() => actions.undo()} title="撤销一步">
+      <button disabled={!(playing || placement) || s.aiThinking} onClick={() => actions.undo()} title="撤销一步">
         ⏪ 悔棋
       </button>
       <button disabled={!playing || s.aiThinking} onClick={() => actions.pass()} title="停一手（双方连停两次进入数子）">

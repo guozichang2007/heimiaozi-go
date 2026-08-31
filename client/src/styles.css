@@ -389,6 +389,43 @@ body {
   margin-top: 4px;
 }
 
+.field .handicap-chk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.field .handicap-chk input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
+.field .handicap-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field .handicap-row input[type='number'] {
+  width: 88px;
+  padding: 7px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  font-size: 15px;
+}
+.field .handicap-row input[type='number']:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.field .handicap-row span {
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .field-info {
   text-align: center;
   color: var(--muted);
@@ -479,13 +516,13 @@ body {
 }
 
 /* ========== 领地热力图自定义配色（覆盖 shudan 默认）==========
-   strength 6~9 = 黑方领地倾向（暖橙），1~4 = 白方领地倾向（冷蓝） */
+   strength 6~9 = 黑方领地倾向（纯黑），1~4 = 白方领地倾向（纯白） */
 .shudan-vertex.shudan-heat_6 .shudan-heat,
 .shudan-vertex.shudan-heat_7 .shudan-heat,
 .shudan-vertex.shudan-heat_8 .shudan-heat,
 .shudan-vertex.shudan-heat_9 .shudan-heat {
-  background: #ff7a3c;
-  box-shadow: 0 0 1em 1em #ff7a3c;
+  background: #000;
+  box-shadow: 0 0 1em 1em rgba(0, 0, 0, 0.9);
 }
 
 .shudan-vertex.shudan-heat_6 .shudan-heat {
@@ -505,8 +542,8 @@ body {
 .shudan-vertex.shudan-heat_2 .shudan-heat,
 .shudan-vertex.shudan-heat_3 .shudan-heat,
 .shudan-vertex.shudan-heat_4 .shudan-heat {
-  background: #3ca9ff;
-  box-shadow: 0 0 1em 1em #3ca9ff;
+  background: #fff;
+  box-shadow: 0 0 1em 1em rgba(255, 255, 255, 0.9);
 }
 
 .shudan-vertex.shudan-heat_1 .shudan-heat {

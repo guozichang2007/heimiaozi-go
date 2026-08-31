@@ -57,6 +57,13 @@ function buildToolResultMessages(system: string, userText: string, toolName: str
 export class Agent {
   private executor: Executor;
   private client: DeepSeekClient | null;
+  /** 用户对话滚动上下文：保留最近 20 轮（黑喵子落子台词不参与） */
+  private history: ChatMessage[] = [];
+  private static readonly HISTORY_TURNS = 20;
+  /** 上一次 AI 落子后的本喵方胜率（落子发言的胜率突变判定基准） */
+  private lastAiMoveWinrate: number | null = null;
+  /** 最近一手 AI 的本喵方胜率变化量（百分比，供台词引用） */
+  private lastAiMoveSwing: number | null = null;
 
   constructor(
     private game: GameManager,
@@ -74,6 +81,41 @@ export class Agent {
     return this.executor.getBoardSummary().then((ctx) => systemPrompt() + contextHeader(ctx));
   }
 
+  /** 把滚动对话历史插入 system（第一条消息）之后 */
+  private withHistory(msgs: ChatMessage[]): ChatMessage[] {
+    if (!this.history.length) return msgs;
+    return [...msgs.slice(0, 1), ...this.history, ...msgs.slice(1)];
+  }
+
+  /** 记录一轮对话（user+assistant），只保留最近 20 轮 */
+  private pushHistory(userText: string, replyText: string): void {
+    this.history.push({ role: 'user', content: userText }, { role: 'assistant', content: replyText });
+    const max = Agent.HISTORY_TURNS * 2;
+    if (this.history.length > max) this.history = this.history.slice(this.history.length - max);
+  }
+
+  /** 判定 AI 落子后是否发言：对局第一手直接发言；之后仅当本喵方胜率较上一手 AI 变化 |Δ|≥8% 才发言；并更新基准 */
+  shouldSpeakOnAiMove(evt: AiMoveEvent): boolean {
+    // winrateAfter 为「轮到方(用户)」视角，换算为本喵方
+    const catWr = evt.winrateAfter != null ? 1 - evt.winrateAfter : null;
+    if (catWr == null) return false; // 分析缺失，跳过且不改基准
+    const prev = this.lastAiMoveWinrate;
+    this.lastAiMoveWinrate = catWr;
+    // 对局第一手（无基准）：直接发言
+    if (prev == null) {
+      this.lastAiMoveSwing = null;
+      return true;
+    }
+    this.lastAiMoveSwing = (catWr - prev) * 100;
+    return Math.abs(this.lastAiMoveSwing) >= 8;
+  }
+
+  /** 新对局开始时重置落子发言基准 */
+  resetAiMoveWinrate(): void {
+    this.lastAiMoveWinrate = null;
+    this.lastAiMoveSwing = null;
+  }
+
   /** 处理用户聊天消息 */
   async handleUserMessage(text: string, onDelta: (chunk: string) => void, onDone: (full: string) => void): Promise<void> {
     if (!this.client) {
@@ -88,25 +130,27 @@ export class Agent {
     console.log('[agent] 路由判定:', JSON.stringify(fast), '文本:', text.slice(0, 30));
     if (fast?.type === 'game_action') {
       const result = await this.executor.doAction(fast.action);
-      await this.streamReply(buildToolResultMessages(system, text, 'do_game_action', result), onDelta, onDone, 120);
+      const reply = await this.streamReply(this.withHistory(buildToolResultMessages(system, text, 'do_game_action', result)), onDelta, onDone, 120);
+      this.pushHistory(text, reply);
       return;
     }
     if (fast?.type === 'help_move') {
       const result = await this.executor.getBestMoveAdvice();
-      await this.streamReply(
-        [{ role: 'system', content: adviceSystem(system, result) }, { role: 'user', content: text }],
+      const reply = await this.streamReply(
+        this.withHistory([{ role: 'system', content: adviceSystem(system, result) }, { role: 'user', content: text }]),
         onDelta,
         onDone,
         220,
         0.7,
       );
+      this.pushHistory(text, reply);
       return;
     }
 
     // L1 LLM 工具路由
     try {
       const first = await this.client.chat({
-        messages: [{ role: 'system', content: system }, { role: 'user', content: text }],
+        messages: this.withHistory([{ role: 'system', content: system }, { role: 'user', content: text }]),
         tools: TOOLS,
         temperature: 1.05,
         maxTokens: 300,
@@ -127,9 +171,10 @@ export class Agent {
           result = await this.executor.doAction(action as 'undo' | 'resign' | 'score' | 'territory');
         } else result = await this.executor.getBoardSummary();
         // L3 应答
+        let reply: string;
         if (tc.name === 'get_user_best_move') {
-          await this.streamReply(
-            [{ role: 'system', content: adviceSystem(system, result) }, { role: 'user', content: text }],
+          reply = await this.streamReply(
+            this.withHistory([{ role: 'system', content: adviceSystem(system, result) }, { role: 'user', content: text }]),
             onDelta,
             onDone,
             220,
@@ -142,19 +187,23 @@ export class Agent {
             { role: 'assistant', content: null, tool_calls: [{ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.args } }] },
             { role: 'tool', tool_call_id: tc.id, content: result },
           ];
-          await this.streamReply(msgs, onDelta, onDone, 200, 0.8);
+          reply = await this.streamReply(this.withHistory(msgs), onDelta, onDone, 200, 0.8);
         }
+        this.pushHistory(text, reply);
         return;
       }
-      onDone(first.content || '喵~');
+      const reply = first.content || '喵~';
+      this.pushHistory(text, reply);
+      onDone(reply);
     } catch (e) {
       console.error('[agent] 路由失败:', e);
-      await this.streamReply(
-        [{ role: 'system', content: system }, { role: 'user', content: text }],
+      const reply = await this.streamReply(
+        this.withHistory([{ role: 'system', content: system }, { role: 'user', content: text }]),
         onDelta,
         onDone,
         200,
       );
+      this.pushHistory(text, reply);
     }
   }
 
@@ -171,11 +220,13 @@ export class Agent {
     const event = evt.pass
       ? '本喵刚才选择停一手（Pass）'
       : `本喵刚刚下了 ${(evt.vertex ?? '').toUpperCase()} 这手棋`;
-    const content = `${event}（${wb} ${wa}）。`;
-    const messages: ChatMessage[] = [
+    const swingText = this.lastAiMoveSwing != null ? `，本手本喵方胜率${this.lastAiMoveSwing >= 0 ? '提升' : '减少'}${Math.abs(this.lastAiMoveSwing).toFixed(0)}%` : '';
+    const content = `${event}（${wb} ${wa}${swingText}）。`;
+    // 落子发言同样带上 20 轮聊天上下文，保持对话连贯
+    const messages: ChatMessage[] = this.withHistory([
       { role: 'system', content: system },
       { role: 'user', content: `请以黑喵子的口吻，就刚才这手棋说一句简短、可爱、自然的台词（35 字以内，可点评局势/自夸/吐槽）。事件：${content}` },
-    ];
+    ]);
     try {
       await this.streamReply(messages, onDelta, onDone, 70, 1.2);
     } catch (e) {
@@ -190,14 +241,17 @@ export class Agent {
     onDone: (full: string) => void,
     maxTokens: number,
     temperature = 1.1,
-  ): Promise<void> {
+  ): Promise<string> {
     try {
       const res = await this.client!.chat({ messages, stream: true, maxTokens, temperature, onDelta });
-      onDone(res.content || '喵~（本喵刚才走神了…）');
+      const full = res.content || '喵~（本喵刚才走神了…）';
+      onDone(full);
+      return full;
     } catch (e) {
       console.error('[agent] 回复失败:', e);
       onDelta('（黑喵子突然卡住了喵…）');
       onDone('（黑喵子突然卡住了喵…）');
+      return '（黑喵子突然卡住了喵…）';
     }
   }
 }
