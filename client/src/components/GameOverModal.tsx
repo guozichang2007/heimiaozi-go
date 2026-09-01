@@ -2,20 +2,34 @@ import { state, actions } from '../state/store';
 import { CatAvatar } from './CatAvatar';
 
 export function GameOverModal({ onNewGame }: { onNewGame: () => void }) {
-  const r = state.value.result;
+  const s = state.value;
+  const r = s.result;
   if (!r) return null;
 
-  const winnerName = r.winnerIsHuman ? '你' : '黑喵子';
-  const reasonText =
-    r.reason === 'resign' ? '黑喵子中盘获胜（你认输）' : r.reason === 'ai-resign' ? '你获胜（黑喵子认输）' : '按中国规则数子终局';
+  const isLocal = s.settings?.mode === 'local';
+  const winnerName = isLocal ? (r.winner === 1 ? '黑方' : '白方') : r.winnerIsHuman ? '你' : '黑喵子';
+  const title = isLocal
+    ? `${winnerName}获胜！`
+    : r.winnerIsHuman
+      ? '恭喜你赢了黑喵子喵！'
+      : '黑喵子获胜喵~ 再试一次！';
+  const reasonText = isLocal
+    ? r.reason === 'resign'
+      ? `${winnerName}中盘获胜（${r.winner === 1 ? '白方' : '黑方'}认输）`
+      : '按中国规则数子终局'
+    : r.reason === 'resign'
+      ? '黑喵子中盘获胜（你认输）'
+      : r.reason === 'ai-resign'
+        ? '你获胜（黑喵子认输）'
+        : '按中国规则数子终局';
 
   return (
     <div className="settings-overlay">
       <div className="settings-card gameover">
-        <div className="gameover-emoji">{r.winnerIsHuman ? '🎉' : <CatAvatar size={52} />}</div>
-        <div className="gameover-title">
-          {r.winnerIsHuman ? '恭喜你赢了黑喵子喵！' : '黑喵子获胜喵~ 再试一次！'}
+        <div className="gameover-emoji">
+          {isLocal ? '🏆' : r.winnerIsHuman ? '🎉' : <CatAvatar size={52} />}
         </div>
+        <div className="gameover-title">{title}</div>
         <div className="gameover-detail">
           {winnerName} 获胜 · {reasonText}
         </div>

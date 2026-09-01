@@ -1,3 +1,4 @@
+import { useState, useRef } from 'preact/hooks';
 import { Goban } from '@sabaki/shudan';
 import { state, actions, territoryView } from '../state/store';
 import { GameState } from '../state/store';
@@ -68,8 +69,8 @@ function toMarkerMap(s: GameState): ({ type: string; label?: string } | null)[][
   }
   // 提示最佳落点（①②③ 标签）
   if (s.hintMoves && s.hintMoves.length) {
-    s.hintMoves.slice(0, 3).forEach((v, i) => {
-      const xy = gtpToXY(v, size);
+    s.hintMoves.slice(0, 3).forEach((h, i) => {
+      const xy = gtpToXY(h.move, size);
       if (xy) rows[xy[1]][xy[0]] = { type: 'label', label: `${i + 1}` };
     });
   }
@@ -83,10 +84,29 @@ export function BoardView() {
   const heat = territoryView.value && s.heatmap ? toHeatMap(s.heatmap, size) : null;
   const markerMap = toMarkerMap(s);
 
+  // 复盘虚影（记录下一手落点，半透明）
+  const ghostMap: ({ sign: 1 | -1; faint: boolean } | null)[][] = Array.from({ length: size }, () =>
+    Array(size).fill(null),
+  );
+  const gh = s.review?.ghost;
+  if (gh && !gh.pass && gh.x >= 0 && gh.y >= 0 && gh.x < size && gh.y < size) {
+    ghostMap[gh.y][gh.x] = { sign: gh.color === 1 ? 1 : -1, faint: true };
+  }
+
+  const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // 提示候选点（坐标 → 参数），供悬停提示框读取
+  const hintAt = new Map<string, { winrate: number; scoreMean: number }>();
+  s.hintMoves.slice(0, 3).forEach((h) => {
+    const xy = gtpToXY(h.move, size);
+    if (xy) hintAt.set(`${xy[0]},${xy[1]}`, h);
+  });
+
   const humanTurn =
     (s.phase === 'playing' || s.phase === 'placement') &&
     s.settings &&
-    s.currentPlayer === s.settings.humanColor &&
+    (s.settings.mode === 'local' || s.currentPlayer === s.settings.humanColor) &&
     !s.aiThinking;
   const dimmed = s.phase === 'scoring' ? s.deadStones.map((idx) => [idx % size, Math.floor(idx / size)] as [number, number]) : [];
 
@@ -98,20 +118,44 @@ export function BoardView() {
     if (humanTurn) actions.play(x, y);
   };
 
+  // 悬停提示：显示该选点的胜率 / 目差
+  const onVertexEnter = (evt: MouseEvent, [x, y]: [number, number]) => {
+    const h = hintAt.get(`${x},${y}`);
+    const el = wrapRef.current;
+    if (!h || !el) return;
+    const rect = el.getBoundingClientRect();
+    const wr = (h.winrate * 100).toFixed(1);
+    const sc = h.scoreMean >= 0 ? '+' : '';
+    setTip({
+      x: evt.clientX - rect.left,
+      y: evt.clientY - rect.top,
+      text: `胜率 ${wr}% · 目差 ${sc}${h.scoreMean.toFixed(1)}`,
+    });
+  };
+  const onVertexLeave = () => setTip(null);
+
   return (
-    <div className={`board-wrap ${territoryView.value ? 'territory-on' : ''}`}>
+    <div className={`board-wrap ${territoryView.value ? 'territory-on' : ''}`} ref={wrapRef}>
       <Goban
         signMap={signMap}
         heatMap={heat}
         markerMap={markerMap}
+        ghostStoneMap={ghostMap}
         dimmedVertices={dimmed}
         showCoordinates={true}
         busy={s.aiThinking}
         fuzzyStonePlacement={false}
         animateStonePlacement={true}
         onVertexMouseUp={onVertex as any}
+        onVertexMouseEnter={onVertexEnter as any}
+        onVertexMouseLeave={onVertexLeave as any}
         innerProps={{ onContextMenu: (e: Event) => e.preventDefault() }}
       />
+      {tip && (
+        <div className="hint-tooltip" style={{ left: tip.x, top: tip.y }}>
+          {tip.text}
+        </div>
+      )}
     </div>
   );
 }

@@ -24,20 +24,23 @@ import { DeepSeekClient } from './agent/deepseek';
 import { DIFFICULTY_KEYS, Difficulty } from './katago/difficulty';
 import { buildSgf } from './sgf';
 import { BLACK, WHITE, Color } from './game/goban';
+import { createShockDevice } from './shock/shock';
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 function normalizeSettings(raw: any): GameSettings {
+  const mode: 'ai' | 'local' = raw.mode === 'local' ? 'local' : 'ai';
   const boardSize = [9, 13, 19].includes(Number(raw.boardSize)) ? Number(raw.boardSize) : 19;
-  const handicap = Math.max(0, Math.min(40, Number(raw.handicap) || 0));
+  const handicap = mode === 'local' ? 0 : Math.max(0, Math.min(40, Number(raw.handicap) || 0));
   let komi = Math.max(-20, Math.min(20, Number(raw.komi) || 7.5));
   if (handicap > 0) komi = 0; // 让子局白不贴目
   const difficulty: Difficulty = DIFFICULTY_KEYS.includes(raw.difficulty) ? raw.difficulty : 'hard';
   let humanColor: Color = raw.humanColor === 'W' ? WHITE : BLACK;
   if (handicap > 0) humanColor = BLACK; // 让子棋用户执黑
   return {
+    mode,
     boardSize,
     komi,
     handicap,
@@ -65,6 +68,15 @@ async function main() {
   let agent: Agent;
   const manager = new GameManager(gtp, analysis, {
     onState: (s) => io.emit('state', s),
+    onPlayerDropShock: (drop) => {
+      // 隐藏功能：玩家胜率大跌触发郊狼电击（不阻塞对局）
+      const intensity = Math.max(0.2, Math.min(1, 0.2 + ((drop - 8) / 92) * 0.8));
+      shock.trigger(intensity).catch((e) => console.error('[shock] 电击失败:', (e as Error).message));
+    },
+    onBgmTrigger: () => {
+      // 对局一方胜率首次 ≥99% → 通知前端播放 BGM（单曲一次）
+      io.emit('bgm:play');
+    },
     onAiMoved: (evt) => {
       // 仅在本喵方胜率较上一手 AI 变化 ≥15% 时才发言
       if (!agent.shouldSpeakOnAiMove(evt)) return;
@@ -79,6 +91,8 @@ async function main() {
   });
   agent = new Agent(manager, DEEPSEEK_API_KEY ? new DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_MODEL) : null);
   if (!DEEPSEEK_API_KEY) console.warn('[黑喵子] 未配置 DEEPSEEK_API_KEY，将离线。填 server/.env 后重启即可。');
+  // 隐藏功能：玩家胜率大跌时触发郊狼电击（默认 Noop，不影响任何功能）
+  const shock = createShockDevice();
 
   // 后台启动 GTP 引擎（模型加载耗时，不阻塞 HTTP 服务）
   gtp
@@ -127,6 +141,20 @@ async function main() {
     res.send(sgf);
   });
 
+  // 复盘：导入 SGF 对局文件（文本 body），成功后广播 state
+  app.post('/api/import-sgf', express.text({ limit: '2mb' }), async (req, res) => {
+    if (!gtp.isReady) {
+      res.status(400).json({ error: 'KataGo 引擎尚未就绪，请稍候……' });
+      return;
+    }
+    try {
+      await manager.importSgf(String(req.body || ''));
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   io.on('connection', (socket) => {
     socket.emit('state', manager.getState());
     socket.emit('config', {
@@ -169,6 +197,15 @@ async function main() {
     socket.on('game:reopen', async (ack) => {
       const ok = await manager.reopenBoard();
       if (typeof ack === 'function') ack(ok);
+    });
+    socket.on('game:reviewNext', async () => {
+      await manager.reviewNext();
+    });
+    socket.on('game:reviewPrev', async () => {
+      await manager.reviewPrev();
+    });
+    socket.on('game:endReview', async () => {
+      await manager.endReview();
     });
     socket.on('game:territory', async (on: boolean) => {
       if (on) await manager.requestTerritory();

@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals';
 import { io, Socket } from 'socket.io-client';
+import { playTriggerBgm, stopTriggerBgm } from '../music';
 
 export type Phase = 'setup' | 'placement' | 'playing' | 'scoring' | 'over';
 export type Color = 1 | 2;
@@ -20,6 +21,7 @@ export interface GameState {
   currentPlayer: Color;
   moveCount: number;
   settings: {
+    mode: 'ai' | 'local';
     boardSize: number;
     komi: number;
     handicap: number;
@@ -41,11 +43,17 @@ export interface GameState {
   } | null;
   aiThinking: boolean;
   heatmap: number[] | null;
-  hintMoves: string[];
+  hintMoves: { move: string; winrate: number; scoreMean: number }[];
   /** 摆子阶段剩余让子手数 */
   handicapRemaining: number;
   winrate: number | null;
   scoreLead: number | null;
+  review: {
+    index: number;
+    total: number;
+    ghost: { color: Color; x: number; y: number; pass: boolean } | null;
+    deviated: boolean;
+  } | null;
   consecutivePasses: number;
 }
 
@@ -72,6 +80,7 @@ export const state = signal<GameState>({
   handicapRemaining: 0,
   winrate: null,
   scoreLead: null,
+  review: null,
   consecutivePasses: 0,
 });
 
@@ -82,6 +91,8 @@ export const showWinrate = signal(true);
 export const hintLoading = signal(false);
 export const connected = signal(false);
 export const lastError = signal('');
+/** 声音/静音（影响对局 99% 触发的 BGM），无音量条 */
+export const bgmMuted = signal(typeof localStorage !== 'undefined' && localStorage.getItem('bgmMuted') === '1');
 
 let socket: Socket | null = null;
 
@@ -98,6 +109,10 @@ export function connect(): void {
   socket.on('error', (e: string) => {
     lastError.value = String(e);
     setTimeout(() => (lastError.value = ''), 4000);
+  });
+  socket.on('bgm:play', () => {
+    // 对局一方胜率首次 ≥99%：未静音时播放 BGM（单曲一次）
+    if (!bgmMuted.value) playTriggerBgm();
   });
   socket.on('chat:user', (m: { id: string; text: string }) => pushMsg({ id: m.id, role: 'user', text: m.text }));
   socket.on('chat:start', (m: { id: string; role: string }) => {
@@ -148,6 +163,29 @@ export const actions = {
       }
     });
   },
+  reviewNext(): void {
+    socket?.emit('game:reviewNext');
+  },
+  reviewPrev(): void {
+    socket?.emit('game:reviewPrev');
+  },
+  endReview(): void {
+    socket?.emit('game:endReview');
+  },
+  /** 导入 SGF 对局文件（复盘）。返回错误信息或 null */
+  async importSgfText(text: string): Promise<string | null> {
+    try {
+      const res = await fetch('/api/import-sgf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: text,
+      });
+      const data = await res.json().catch(() => ({}));
+      return res.ok ? null : String((data as { error?: unknown })?.error ?? '导入失败');
+    } catch (e) {
+      return String(e);
+    }
+  },
   toggleTerritory(): void {
     territoryView.value = !territoryView.value;
     socket?.emit('game:territory', territoryView.value);
@@ -167,5 +205,14 @@ export const actions = {
   },
   downloadSgf(): void {
     window.location.href = '/api/sgf';
+  },
+  toggleBgmMuted(): void {
+    bgmMuted.value = !bgmMuted.value;
+    if (bgmMuted.value) stopTriggerBgm(); // 静音时立即停止当前播放
+    try {
+      localStorage.setItem('bgmMuted', bgmMuted.value ? '1' : '0');
+    } catch {
+      // ignore
+    }
   },
 };

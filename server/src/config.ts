@@ -12,6 +12,12 @@ export const DEEPSEEK_API_KEY = (process.env.DEEPSEEK_API_KEY || '').trim();
 export const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
+/** 隐藏功能：玩家落子后胜率大跌触发郊狼电击（Buttplug/Intiface 通道）。默认关闭，不影响任何现有功能。 */
+export const SHOCK_ENABLED = (process.env.SHOCK_ENABLED || 'false').toLowerCase() === 'true';
+export const SHOCK_INTENSITY = Math.max(0, Math.min(1, Number(process.env.SHOCK_INTENSITY) || 0.6));
+export const SHOCK_DURATION_MS = Math.max(100, Number(process.env.SHOCK_DURATION_MS) || 1200);
+export const SHOCK_WS_URL = (process.env.SHOCK_WS_URL || 'ws://127.0.0.1:12345').trim();
+
 /** 引擎后端：opencl（默认）| cuda */
 export const KATAGO_BACKEND = (process.env.KATAGO_BACKEND || 'opencl').toLowerCase();
 

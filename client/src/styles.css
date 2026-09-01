@@ -42,6 +42,29 @@ body {
   backdrop-filter: blur(6px);
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sound-btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 9px;
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+.sound-btn:hover {
+  border-color: var(--accent);
+}
+.sound-btn.off {
+  opacity: 0.55;
+}
+
 .logo {
   font-size: 20px;
   font-weight: 700;
@@ -573,6 +596,29 @@ body {
 /* ========== 棋盘右上角：黑白胜率悬浮牌 ========== */
 .board-wrap {
   position: relative;
+}
+
+/* ========== 提示选点悬停提示框 ========== */
+.hint-tooltip {
+  position: absolute;
+  z-index: 50;
+  pointer-events: none;
+  white-space: nowrap;
+  background: rgba(18, 21, 31, 0.95);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  transform: translate(14px, 14px);
+}
+
+/* ========== 复盘虚影：与正常棋子同尺寸（覆盖 shudan 默认 .4em 小虚影） ========== */
+.shudan-vertex .shudan-ghost,
+.shudan-vertex .shudan-ghost::before {
+  width: calc(100% - 0.08em);
+  height: calc(100% - 0.08em);
 }
 
 .wr-toggle {

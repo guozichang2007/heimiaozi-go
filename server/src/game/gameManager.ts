@@ -3,10 +3,16 @@ import { GtpEngine, vertexToGtp, gtpToXY } from '../katago/gtpEngine';
 import { AnalysisEngine, AnalysisResponse } from '../katago/analysisEngine';
 import { Difficulty } from '../katago/difficulty';
 import { computeScoreWithKomi, ScoreResult } from './scoring';
+import { parseSgfGame } from '../sgf';
+
+/** 玩家落子后胜率下跌触发隐藏电击的阈值（百分比） */
+const PLAYER_DROP_SHOCK_THRESHOLD = 8;
 
 export type Phase = 'setup' | 'placement' | 'playing' | 'scoring' | 'over';
 
 export interface GameSettings {
+  /** 对弈模式：ai=人机对战；local=线下真人对弈（黑白轮流，无 AI 自动应手） */
+  mode: 'ai' | 'local';
   boardSize: number;
   komi: number;
   handicap: number;
@@ -23,6 +29,36 @@ export interface MoveRecord {
   moveNumber: number;
   captured: number;
   vertex: string | null;
+}
+
+/** 提示的单个候选选点（GTP 坐标 + KataGo 返回的参数） */
+export interface HintMove {
+  /** GTP 坐标 */
+  move: string;
+  /** 该着法的轮到方胜率 0~1 */
+  winrate: number;
+  /** 该着法的目差（轮到方视角，正=领先） */
+  scoreMean: number;
+}
+
+/** 复盘记录中的单步（来自 SGF 主变） */
+export interface ReviewMove {
+  color: Color;
+  x: number;
+  y: number;
+  pass: boolean;
+}
+
+/** 复盘状态（本地双人模式） */
+export interface ReviewState {
+  /** 下一个要落的记录手（0 基） */
+  index: number;
+  /** 记录总手数 */
+  total: number;
+  /** 虚影（未偏离且未走完时的下一手）；pass 时无落点 */
+  ghost: { color: Color; x: number; y: number; pass: boolean } | null;
+  /** 是否处于自由推演（棋盘手数超过记录 index） */
+  deviated: boolean;
 }
 
 export interface GameResult {
@@ -50,14 +86,16 @@ export interface PublicState {
   result: GameResult | null;
   aiThinking: boolean;
   heatmap: number[] | null;
-  /** 提示的最佳选点（GTP 坐标） */
-  hintMoves: string[];
+  /** 提示的最佳选点（GTP 坐标 + 胜率/目差参数） */
+  hintMoves: HintMove[];
   /** 摆子阶段剩余让子手数 */
   handicapRemaining: number;
   /** 最近一次分析：轮到的一方（side to move）胜率 0~1 */
   winrate: number | null;
   /** 最近一次分析：轮到的一方目差（正=领先） */
   scoreLead: number | null;
+  /** 复盘状态（本地双人模式导入 SGF 后非空） */
+  review: ReviewState | null;
   consecutivePasses: number;
 }
 
@@ -73,6 +111,10 @@ export interface AiMoveEvent {
 export interface GameManagerEvents {
   onState?: (s: PublicState) => void;
   onAiMoved?: (e: AiMoveEvent) => void;
+  /** 隐藏功能：玩家落子后胜率较上一次下跌 ≥8% 时回调（dropPct 为跌幅百分比） */
+  onPlayerDropShock?: (dropPct: number) => void;
+  /** 对局一方胜率首次 ≥98.5% 时触发 BGM（复盘模式除外，每方每局至多一次） */
+  onBgmTrigger?: () => void;
 }
 
 /**
@@ -99,9 +141,20 @@ export class GameManager {
     winrate: null,
     scoreLead: null,
     consecutivePasses: 0,
+    review: null,
   };
 
   private moves: MoveRecord[] = [];
+  /** 玩家上一手落子后的胜率（隐藏电击功能用） */
+  private lastPlayerWinrate: number | null = null;
+  /** 复盘记录（导入 SGF 后非空）；index 指向下一个要落的记录手 */
+  private reviewMoves: ReviewMove[] | null = null;
+  private reviewIndex = 0;
+  /** 复盘的让子/AB 预置子 */
+  private reviewAbStones: { x: number; y: number }[] = [];
+  /** BGM 触发标记（每方每局至多一次） */
+  private bgmTriggeredBlack = false;
+  private bgmTriggeredWhite = false;
   private events: GameManagerEvents;
   private analysisReady = false;
   /** 操作互斥队列：socket 事件并发到达时，对局操作串行执行 */
@@ -127,12 +180,34 @@ export class GameManager {
   }
 
   private emit(): void {
-    this.state = { ...this.state, captures: { ...this.state.captures }, grid: this.goban.toArray(), lastMove: this.goban.lastMove };
+    this.state = {
+      ...this.state,
+      captures: { ...this.state.captures },
+      grid: this.goban.toArray(),
+      lastMove: this.goban.lastMove,
+      review: this.reviewPublic(),
+    };
     this.events.onState?.(this.state);
   }
 
+  /** 推导复盘公开状态（虚影/偏离） */
+  private reviewPublic(): ReviewState | null {
+    if (!this.reviewMoves) return null;
+    const deviated = this.moves.length > this.reviewIndex;
+    const ghost =
+      !deviated && this.reviewIndex < this.reviewMoves.length
+        ? this.reviewMoves[this.reviewIndex]
+        : null;
+    return { index: this.reviewIndex, total: this.reviewMoves.length, ghost, deviated };
+  }
+
   getState(): PublicState {
-    return { ...this.state, captures: { ...this.state.captures }, grid: [...this.state.grid] };
+    return {
+      ...this.state,
+      captures: { ...this.state.captures },
+      grid: [...this.state.grid],
+      review: this.reviewPublic(),
+    };
   }
 
   getSettings(): GameSettings | null {
@@ -155,6 +230,12 @@ export class GameManager {
 
   private async startGameImpl(settings: GameSettings): Promise<void> {
     this.moves = [];
+    this.lastPlayerWinrate = null;
+    this.reviewMoves = null;
+    this.reviewIndex = 0;
+    this.reviewAbStones = [];
+    this.bgmTriggeredBlack = false;
+    this.bgmTriggeredWhite = false;
     this.goban = new Goban(settings.boardSize);
     const isHandicap = settings.handicap > 0;
     this.state = {
@@ -175,11 +256,17 @@ export class GameManager {
       scoreLead: null,
       consecutivePasses: 0,
       handicapRemaining: isHandicap ? settings.handicap : 0,
+      review: null,
     };
     await this.gtp.clearBoard(settings.boardSize, settings.komi);
     await this.gtp.applyDifficulty(settings.difficulty);
     // 让子棋：进入摆子阶段，由玩家自由摆放 N 颗黑子
     this.emit();
+    // 双人模式：开局即显示初始胜率；不自动应手
+    if (settings.mode === 'local') {
+      await this.tryAnalyze();
+      return;
+    }
     // 无让子且 AI 先手（用户执白）时 AI 先落子
     if (!isHandicap && this.state.currentPlayer === settings.aiColor) {
       await this.aiMove();
@@ -212,19 +299,21 @@ export class GameManager {
     const s = this.state;
     if (!s.settings) return false;
     if (s.aiThinking) return false;
-    if (s.currentPlayer !== s.settings.humanColor) return false;
+    // 双人模式：当前方即可落子；人机模式：仅玩家
+    if (s.settings.mode !== 'local' && s.currentPlayer !== s.settings.humanColor) return false;
+    const player = s.settings.mode === 'local' ? s.currentPlayer : s.settings.humanColor;
     const vertex = vertexToGtp(x, y, s.boardSize);
 
     // 摆子阶段：玩家自由摆放让子
     if (s.phase === 'placement') {
       try {
-        await this.gtp.play(s.settings.humanColor, vertex);
+        await this.gtp.play(player, vertex);
       } catch (e) {
         return false;
       }
       try {
-        const res = this.goban.place(s.settings.humanColor, x, y);
-        this.pushMove(s.settings.humanColor, x, y, false, res.captured.length);
+        const res = this.goban.place(player, x, y);
+        this.pushMove(player, x, y, false, res.captured.length);
       } catch (e) {
         await this.syncFromHistory();
         return false;
@@ -233,7 +322,7 @@ export class GameManager {
       this.state.winrate = null;
       if (s.handicapRemaining <= 0) {
         s.phase = 'playing';
-        s.currentPlayer = otherColor(s.settings.humanColor);
+        s.currentPlayer = otherColor(player);
         this.emit();
         await this.aiMove(); // 摆完让子，AI 先手
       } else {
@@ -244,15 +333,22 @@ export class GameManager {
 
     // 正常对弈：先让引擎落子（引擎为规则权威）；成功后再更新本地棋盘
     if (s.phase !== 'playing') return false;
+    // 复盘模式：点在虚影处 = 按记录前进（否则为自由推演的普通落子）
+    if (this.reviewMoves && this.moves.length === this.reviewIndex && this.reviewIndex < this.reviewMoves.length) {
+      const mv = this.reviewMoves[this.reviewIndex];
+      if (!mv.pass && mv.color === player && mv.x === x && mv.y === y) {
+        return await this.reviewNextImpl();
+      }
+    }
     try {
-      await this.gtp.play(s.settings.humanColor, vertex);
+      await this.gtp.play(player, vertex);
     } catch (e) {
       console.error('[humanPlay] 引擎拒绝落子:', (e as Error).message);
       return false;
     }
     try {
-      const res = this.goban.place(s.settings.humanColor, x, y);
-      this.pushMove(s.settings.humanColor, x, y, false, res.captured.length);
+      const res = this.goban.place(player, x, y);
+      this.pushMove(player, x, y, false, res.captured.length);
       this.state.winrate = null;
       await this.afterMove();
       return true;
@@ -272,9 +368,11 @@ export class GameManager {
   private async humanPassImpl(): Promise<boolean> {
     const s = this.state;
     if (s.phase !== 'playing' || !s.settings) return false;
-    if (s.currentPlayer !== s.settings.humanColor || s.aiThinking) return false;
-    await this.gtp.play(s.settings.humanColor, null);
-    this.pushMove(s.settings.humanColor, 0, 0, true, 0);
+    if (s.settings.mode !== 'local' && s.currentPlayer !== s.settings.humanColor) return false;
+    if (s.aiThinking) return false;
+    const player = s.settings.mode === 'local' ? s.currentPlayer : s.settings.humanColor;
+    await this.gtp.play(player, null);
+    this.pushMove(player, 0, 0, true, 0);
     await this.afterMove();
     return true;
   }
@@ -293,8 +391,35 @@ export class GameManager {
 
     this.state.currentPlayer = otherColor(this.state.currentPlayer);
     this.emit();
-    if (this.state.settings && this.state.currentPlayer === this.state.settings.aiColor) {
+    // 双人模式：不自动应手，但每次落子后更新实时胜率
+    if (this.state.settings?.mode === 'local') {
+      await this.tryAnalyze();
+      return;
+    }
+    if (
+      this.state.settings &&
+      this.state.currentPlayer === this.state.settings.aiColor
+    ) {
       await this.aiMove();
+    }
+  }
+
+  /** 隐藏功能：玩家落子后胜率较上一次大跌 ≥8% 时回调（用于触发郊狼电击） */
+  private maybePlayerDropShock(sideToMoveWinrate: number | null): void {
+    const s = this.state;
+    if (sideToMoveWinrate == null || !s.settings) return;
+    const last = this.moves[this.moves.length - 1];
+    // 仅在上一手是玩家的真实落子（非 Pass）时判定
+    if (!last || last.color !== s.settings.humanColor || last.pass) return;
+    // 此刻轮到 AI，sideToMoveWinrate 为 AI 方胜率 → 玩家胜率 = 1 - 之
+    const playerWr = 1 - sideToMoveWinrate;
+    const prev = this.lastPlayerWinrate;
+    this.lastPlayerWinrate = playerWr;
+    if (prev == null) return;
+    const drop = (prev - playerWr) * 100; // 正=玩家胜率下降
+    if (drop >= PLAYER_DROP_SHOCK_THRESHOLD) {
+      console.log(`[shock] 玩家胜率下跌 ${drop.toFixed(1)}%（${(prev * 100).toFixed(0)}% → ${(playerWr * 100).toFixed(0)}%）`);
+      this.events.onPlayerDropShock?.(drop);
     }
   }
 
@@ -306,6 +431,7 @@ export class GameManager {
     this.emit();
 
     let before = await this.tryAnalyze();
+    this.maybePlayerDropShock(before?.winrate ?? null);
     let res: string;
     try {
       res = await this.gtp.genmove(s.settings.aiColor);
@@ -366,6 +492,7 @@ export class GameManager {
     const s = this.state;
     if ((s.phase !== 'playing' && s.phase !== 'placement') || !s.settings || s.aiThinking) return false;
     if (this.moves.length === 0) return false;
+    this.lastPlayerWinrate = null; // 悔棋后局面回退，胜率基准作废
 
     // 摆子阶段：撤掉最后一颗让子
     if (s.phase === 'placement') {
@@ -375,6 +502,23 @@ export class GameManager {
       this.state.winrate = null;
       this.state.hintMoves = [];
       this.emit();
+      return true;
+    }
+
+    // 双人模式：撤掉最后一手（当前方刚落的子）
+    if (s.settings.mode === 'local') {
+      this.moves = this.moves.slice(0, this.moves.length - 1);
+      // 复盘：若之前处于严格回放，撤销记录手 → index 回退
+      if (this.reviewMoves && this.moves.length < this.reviewIndex) {
+        this.reviewIndex = this.moves.length;
+      }
+      await this.syncFromHistory();
+      this.state.consecutivePasses = 0;
+      this.state.winrate = null;
+      this.state.scoreLead = null;
+      this.state.heatmap = null;
+      this.emit();
+      await this.tryAnalyze(); // 悔棋后刷新实时胜率
       return true;
     }
 
@@ -411,7 +555,9 @@ export class GameManager {
   private async resignImpl(): Promise<boolean> {
     const s = this.state;
     if (s.phase !== 'playing' || !s.settings) return false;
-    this.endGame({ winner: s.settings.aiColor, reason: 'resign' });
+    // 双人模式：当前回合方认输；人机模式：玩家认输
+    const loser = s.settings.mode === 'local' ? s.currentPlayer : s.settings.humanColor;
+    this.endGame({ winner: otherColor(loser), reason: 'resign' });
     return true;
   }
 
@@ -463,10 +609,144 @@ export class GameManager {
     s.heatmap = null;
     s.hintMoves = [];
     this.emit();
-    // 若轮到 AI 先手则继续走子，避免停在"AI 回合但不动"的死状态
-    if (s.currentPlayer === s.settings.aiColor) {
+    // 若轮到 AI 先手则继续走子，避免停在"AI 回合但不动"的死状态；双人模式不自动应手
+    if (s.settings.mode !== 'local' && s.currentPlayer === s.settings.aiColor) {
       await this.aiMove();
     }
+    return true;
+  }
+
+  /** 导入 SGF 对局，进入复盘模式（本地双人） */
+  async importSgf(text: string): Promise<boolean> {
+    return this.enqueue(() => this.importSgfImpl(text));
+  }
+
+  private async importSgfImpl(text: string): Promise<boolean> {
+    const parsed = parseSgfGame(text);
+    const { boardSize, komi, handicapStones, moves } = parsed;
+    if (![9, 13, 19].includes(boardSize)) throw new Error(`不支持的棋盘大小：${boardSize}（仅支持 9/13/19）`);
+    if (!moves.length) throw new Error('SGF 中没有找到走子记录');
+    // 以本地双人模式开新局（空盘）
+    this.moves = [];
+    this.lastPlayerWinrate = null;
+    this.goban = new Goban(boardSize);
+    const settings: GameSettings = {
+      mode: 'local',
+      boardSize,
+      komi,
+      handicap: 0,
+      difficulty: 'hard',
+      humanColor: BLACK,
+      aiColor: WHITE,
+    };
+    this.state = {
+      phase: 'playing',
+      boardSize,
+      grid: this.goban.toArray(),
+      captures: { [BLACK]: 0, [WHITE]: 0 },
+      lastMove: null,
+      currentPlayer: moves[0]?.color ?? BLACK,
+      moveCount: 0,
+      settings,
+      deadStones: [],
+      result: null,
+      aiThinking: false,
+      heatmap: null,
+      hintMoves: [],
+      winrate: null,
+      scoreLead: null,
+      consecutivePasses: 0,
+      handicapRemaining: 0,
+      review: null,
+    };
+    await this.gtp.clearBoard(boardSize, komi);
+    await this.gtp.applyDifficulty('hard');
+    // 预置让子/AB 子（不计入手数）
+    this.reviewAbStones = handicapStones;
+    this.bgmTriggeredBlack = false;
+    this.bgmTriggeredWhite = false;
+    for (const st of handicapStones) {
+      await this.gtp.play(BLACK, vertexToGtp(st.x, st.y, boardSize));
+      this.goban.place(BLACK, st.x, st.y);
+    }
+    this.reviewMoves = moves;
+    this.reviewIndex = 0;
+    this.emit();
+    await this.tryAnalyze(); // 开局即显示初始胜率
+    return true;
+  }
+
+  /** 复盘：按记录下一手 */
+  async reviewNext(): Promise<boolean> {
+    return this.enqueue(() => this.reviewNextImpl());
+  }
+
+  private async reviewNextImpl(): Promise<boolean> {
+    const s = this.state;
+    if (!s.settings || !this.reviewMoves || s.phase !== 'playing') return false;
+    if (this.moves.length > this.reviewIndex) return false; // 自由推演中禁止
+    if (this.reviewIndex >= this.reviewMoves.length) return false;
+    const mv = this.reviewMoves[this.reviewIndex];
+    if (mv.color !== s.currentPlayer) return false;
+    try {
+      if (mv.pass) {
+        await this.gtp.play(mv.color, null);
+        this.pushMove(mv.color, 0, 0, true, 0);
+      } else {
+        await this.gtp.play(mv.color, vertexToGtp(mv.x, mv.y, s.boardSize));
+        const res = this.goban.place(mv.color, mv.x, mv.y);
+        this.pushMove(mv.color, mv.x, mv.y, false, res.captured.length);
+      }
+    } catch (e) {
+      return false;
+    }
+    this.reviewIndex++;
+    s.currentPlayer = otherColor(mv.color);
+    this.state.winrate = null;
+    this.state.hintMoves = [];
+    this.emit();
+    await this.tryAnalyze(); // 每手刷新实时胜率
+    return true;
+  }
+
+  /** 复盘：上一手（自由推演时直接跳回记录位置） */
+  async reviewPrev(): Promise<boolean> {
+    return this.enqueue(() => this.reviewPrevImpl());
+  }
+
+  private async reviewPrevImpl(): Promise<boolean> {
+    const s = this.state;
+    if (!s.settings || !this.reviewMoves || s.phase !== 'playing') return false;
+    if (this.moves.length === 0) return false;
+    if (this.moves.length > this.reviewIndex) {
+      // 自由推演：一步撤光自由推演的落子，回到记录位置
+      this.moves = this.moves.slice(0, this.reviewIndex);
+      await this.syncFromHistory();
+    } else if (this.reviewIndex > 0) {
+      // 严格回放：撤一手记录
+      this.moves = this.moves.slice(0, this.moves.length - 1);
+      this.reviewIndex--;
+      await this.syncFromHistory();
+    } else {
+      return false;
+    }
+    this.state.winrate = null;
+    this.state.hintMoves = [];
+    this.emit();
+    await this.tryAnalyze(); // 回退后刷新实时胜率
+    return true;
+  }
+
+  /** 结束复盘：退出复盘，保留当前局面转普通双人对弈 */
+  async endReview(): Promise<boolean> {
+    return this.enqueue(() => this.endReviewImpl());
+  }
+
+  private async endReviewImpl(): Promise<boolean> {
+    this.reviewMoves = null;
+    this.reviewIndex = 0;
+    this.reviewAbStones = [];
+    this.emit();
     return true;
   }
 
@@ -497,6 +777,13 @@ export class GameManager {
     this.goban = new Goban(s.settings.boardSize);
     await this.gtp.clearBoard(s.settings.boardSize, s.settings.komi);
     await this.gtp.applyDifficulty(s.settings.difficulty);
+    // 复盘：先重放让子/AB 预置子
+    if (this.reviewMoves) {
+      for (const st of this.reviewAbStones) {
+        await this.gtp.play(BLACK, vertexToGtp(st.x, st.y, s.boardSize));
+        this.goban.place(BLACK, st.x, st.y);
+      }
+    }
     for (const mv of this.moves) {
       if (!mv.pass) {
         try {
@@ -513,7 +800,17 @@ export class GameManager {
     if (s.phase === 'placement') {
       s.currentPlayer = s.settings.humanColor;
     } else if (this.moves.length === 0) {
-      s.currentPlayer = s.settings.handicap > 0 ? WHITE : BLACK;
+      s.currentPlayer = this.reviewMoves
+        ? (this.reviewMoves[0]?.color ?? BLACK)
+        : s.settings.handicap > 0
+          ? WHITE
+          : BLACK;
+    } else if (this.reviewMoves && this.moves.length <= this.reviewIndex) {
+      // 复盘严格回放态：轮到记录中下一手方（记录走完则轮到最后一手的对方）
+      s.currentPlayer =
+        this.reviewIndex < this.reviewMoves.length
+          ? this.reviewMoves[this.reviewIndex].color
+          : otherColor(this.moves[this.moves.length - 1].color);
     } else {
       s.currentPlayer = otherColor(this.moves[this.moves.length - 1].color);
     }
@@ -533,9 +830,28 @@ export class GameManager {
       this.state.winrate = winrate;
       this.state.scoreLead = scoreLead;
       this.emit(); // 立即推送胜率/目差（供右上角实时显示）
+      this.maybeTriggerBgm(winrate);
       return { winrate, scoreLead };
     } catch (e) {
       return null;
+    }
+  }
+
+  /** 对局一方胜率首次 ≥98.5% 时触发 BGM 事件（复盘模式除外，每方每局至多一次） */
+  private maybeTriggerBgm(sideToMoveWinrate: number | null): void {
+    const s = this.state;
+    if (sideToMoveWinrate == null || !s.settings) return;
+    if (this.reviewMoves) return; // 复盘模式不触发
+    if (s.phase !== 'playing') return;
+    // winrate 为"轮到方"视角，换算双方胜率
+    const blackWr = s.currentPlayer === BLACK ? sideToMoveWinrate : 1 - sideToMoveWinrate;
+    const whiteWr = 1 - blackWr;
+    if (blackWr >= 0.985 && !this.bgmTriggeredBlack) {
+      this.bgmTriggeredBlack = true;
+      this.events.onBgmTrigger?.();
+    } else if (whiteWr >= 0.985 && !this.bgmTriggeredWhite) {
+      this.bgmTriggeredWhite = true;
+      this.events.onBgmTrigger?.();
     }
   }
 
@@ -569,7 +885,14 @@ export class GameManager {
   private async requestTerritoryImpl(maxVisits = 200): Promise<number[] | null> {
     try {
       const resp = await this.queryAnalysis(true, maxVisits);
-      this.state.heatmap = resp.ownership ?? null;
+      // 分析引擎按 reportAnalysisWinratesAs=SIDETOMOVE 报告 ownership：正值=轮到方领地。
+      // 统一换算为「正值=黑方领地」，供前端"黑=黑、白=白"配色正确。
+      const ownership = resp.ownership;
+      this.state.heatmap = ownership
+        ? this.state.currentPlayer === WHITE
+          ? ownership.map((v) => -v)
+          : [...ownership]
+        : null;
       this.state.winrate = resp.rootInfo?.winrate ?? null;
       this.state.scoreLead = resp.rootInfo?.scoreLead ?? null;
       this.emit();
@@ -590,7 +913,10 @@ export class GameManager {
     if (s.phase !== 'playing' || !s.settings) return false;
     try {
       const resp = await this.queryAnalysis(false, 3000);
-      const top = (resp.moveInfos ?? []).slice(0, 3).map((m) => m.move);
+      // 保留 KataGo 返回的每个选点参数（胜率/目差），供悬停提示框展示
+      const top: HintMove[] = (resp.moveInfos ?? [])
+        .slice(0, 3)
+        .map((m) => ({ move: m.move, winrate: m.winrate, scoreMean: m.scoreMean ?? 0 }));
       this.state.hintMoves = top;
       this.emit();
       return top.length > 0;

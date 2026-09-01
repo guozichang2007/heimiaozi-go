@@ -78,7 +78,15 @@ export class Agent {
   }
 
   private systemWithContext(): Promise<string> {
-    return this.executor.getBoardSummary().then((ctx) => systemPrompt() + contextHeader(ctx));
+    return this.executor.getBoardSummary().then((ctx) => {
+      const settings = this.game.getState().settings;
+      // 双人模式：黑喵子等同"未开局"（无棋局上下文、不声明执子）
+      if (settings?.mode === 'local') {
+        return systemPrompt(null) + contextHeader('对局尚未开始喵。');
+      }
+      const aiColor = settings?.aiColor ?? null;
+      return systemPrompt(aiColor) + contextHeader(ctx);
+    });
   }
 
   /** 把滚动对话历史插入 system（第一条消息）之后 */

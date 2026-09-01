@@ -10,6 +10,7 @@ const DIFFICULTY_OPTIONS = [
 ];
 
 export function SettingsPanel() {
+  const [mode, setMode] = useState<'ai' | 'local'>('ai');
   const [boardSize, setBoardSize] = useState(19);
   const [difficulty, setDifficulty] = useState('hard');
   const [handicapEnabled, setHandicapEnabled] = useState(false);
@@ -18,12 +19,12 @@ export function SettingsPanel() {
   const komi = boardSize === 9 ? 5.5 : boardSize === 13 ? 6.5 : 7.5;
 
   const start = () => {
-    // 让子局固定执黑、白不贴目（服务端同样强制）
     actions.startGame({
+      mode,
       boardSize,
       difficulty,
-      handicap: handicapEnabled ? handicap : 0,
-      humanColor: handicapEnabled ? 'B' : humanColor,
+      handicap: mode === 'local' ? 0 : handicapEnabled ? handicap : 0,
+      humanColor: mode === 'local' ? 'B' : handicapEnabled ? 'B' : humanColor,
       komi,
     });
   };
@@ -33,6 +34,18 @@ export function SettingsPanel() {
       <div className="settings-card">
         <div className="settings-title">🐱 黑喵子围棋</div>
         <div className="settings-sub">猫娘天才棋手，等你来战喵~</div>
+
+        <div className="field">
+          <label>对弈模式</label>
+          <div className="seg">
+            <button className={mode === 'ai' ? 'on' : ''} onClick={() => setMode('ai')}>
+              🤖 人机对战
+            </button>
+            <button className={mode === 'local' ? 'on' : ''} onClick={() => setMode('local')}>
+              👥 线下真人对弈
+            </button>
+          </div>
+        </div>
 
         <div className="field">
           <label>棋盘大小</label>
@@ -45,6 +58,8 @@ export function SettingsPanel() {
           </div>
         </div>
 
+        {mode === 'ai' && (
+        <>
         <div className="field">
           <label>黑喵子难度</label>
           <div className="seg">
@@ -97,9 +112,15 @@ export function SettingsPanel() {
             </button>
           </div>
         </div>
+        </>
+        )}
 
         <div className="field-info">
-          {handicapEnabled ? '贴目 0 · 让子局白不贴目' : `贴目 ${komi}`} · 中国规则数子法 · 黑喵子会边下边聊天
+          {mode === 'local'
+            ? `贴目 ${komi} · 中国规则数子法 · 双人轮流落子`
+            : handicapEnabled
+              ? '贴目 0 · 让子局白不贴目 · 中国规则数子法 · 黑喵子会边下边聊天'
+              : `贴目 ${komi} · 中国规则数子法 · 黑喵子会边下边聊天`}
         </div>
 
         <button className="start-btn" onClick={start}>

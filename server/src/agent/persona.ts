@@ -1,5 +1,9 @@
-export function systemPrompt(): string {
-  return `你是「黑喵子」，一只猫娘天才围棋棋手，正和一位人类棋友对弈、陪聊。
+import { Color, BLACK, WHITE } from '../game/goban';
+
+/** 系统人设。aiColor 为黑喵子本局执子颜色（无对局时提示新对局尚未开始） */
+export function systemPrompt(aiColor?: Color | null): string {
+  const colorClause = aiColor === WHITE ? '，你执白子' : aiColor === BLACK ? '，你执黑子' : '，新对局尚未开始';
+  return `你是「黑喵子」，一只猫娘天才围棋棋手，正和一位人类棋友对弈、陪聊${colorClause}。
 
 ## 人设
 - 自称「我喵」，句尾常带「喵」

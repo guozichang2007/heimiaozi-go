@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
-import { state, serverConfig, connected, lastError } from './state/store';
+import { state, serverConfig, connected, lastError, bgmMuted, actions } from './state/store';
 import { BoardView } from './components/BoardView';
 import { ChatPanel } from './components/ChatPanel';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -12,13 +12,18 @@ const DIFF_LABEL: Record<string, string> = { easy: '入门', medium: '初级', h
 function StatusBar() {
   const s = state.value;
   const cfg = serverConfig.value;
+  const isLocal = s.settings?.mode === 'local';
   const turn =
     s.phase === 'placement'
       ? `摆让子：还剩 ${s.handicapRemaining ?? 0} 手，自由摆放`
       : s.phase === 'playing'
-        ? s.currentPlayer === s.settings?.humanColor
-          ? '你的回合'
-          : '黑喵子思考中…'
+        ? isLocal
+          ? s.currentPlayer === 1
+            ? '黑棋回合'
+            : '白棋回合'
+          : s.currentPlayer === s.settings?.humanColor
+            ? '你的回合'
+            : '黑喵子思考中…'
         : s.phase === 'scoring'
           ? '数子阶段：点选死子，然后「完成数子」'
           : s.phase === 'over'
@@ -32,8 +37,13 @@ function StatusBar() {
       <span className="turn">{turn}</span>
       {s.settings && s.phase !== 'setup' && (
         <span className="info">
-          {s.boardSize}路 · {DIFF_LABEL[s.settings.difficulty] ?? ''}
-          {s.settings.handicap > 0 ? ` · 让${s.settings.handicap}子` : ''} · 第{s.moveCount}手
+          {s.boardSize}路{isLocal ? ' · 双人对弈' : ` · ${DIFF_LABEL[s.settings.difficulty] ?? ''}`}
+          {!isLocal && s.settings.handicap > 0 ? ` · 让${s.settings.handicap}子` : ''} · 第{s.moveCount}手
+        </span>
+      )}
+      {s.review && (
+        <span className="info">
+          复盘 {s.review.index}/{s.review.total} 手{s.review.deviated ? ' · 自由推演中' : ''}
         </span>
       )}
     </div>
@@ -60,7 +70,16 @@ export function App() {
     <div className="app">
       <header className="header">
         <div className="logo"><CatAvatar size={24} /> 黑喵子围棋</div>
-        <StatusBar />
+        <div className="header-right">
+          <StatusBar />
+          <button
+            className={`sound-btn ${bgmMuted.value ? 'off' : ''}`}
+            onClick={() => actions.toggleBgmMuted()}
+            title={bgmMuted.value ? '声音已静音' : '声音开启'}
+          >
+            {bgmMuted.value ? '🔇' : '🔊'}
+          </button>
+        </div>
       </header>
 
       {err && <div className="toast">{err}</div>}
